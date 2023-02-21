@@ -88,6 +88,7 @@ void edit_cigar_print(
     fprintf(out, "%d%c\n", last_op_length, last_op);
 }
 
+// gets length of each line of sequence (pattern and text) and puts it in dpu_requests
 uint32_t get_reads(FILE *in, request_t *dpu_requests, char *dpu_patterns, char *dpu_texts, uint32_t nb_reads_per_dpu, int nb_sent_requests, int total_nb_reads)
 {
     char *line1 = NULL, *line2 = NULL;
