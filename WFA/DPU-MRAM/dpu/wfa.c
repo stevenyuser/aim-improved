@@ -55,6 +55,7 @@ SOFTWARE. */
 #include "dpu_allocator_wram.h"
 #include "dpu_allocator_mram.h"
 
+// safe
 void edit_cigar_allocate(
     edit_cigar_t *edit_cigar,
     int pattern_length,
@@ -67,6 +68,7 @@ void edit_cigar_allocate(
     edit_cigar->score = INT32_MIN;
 }
 
+// safe
 void affine_wfa_reduce_wvs(wfa_component *wfa, awf_offset_t pattern_length, awf_offset_t text_length, int score)
 {
     int min_wavefront_length = 10;
@@ -139,17 +141,27 @@ void affine_wfa_reduce_wvs(wfa_component *wfa, awf_offset_t pattern_length, awf_
         return;
     }
 }
-// insert new score
+
+// insert new score into mram with a size based on wavefront length
+// change!
 wfa_component *allocate_new_score(dpu_alloc_wram_t *allocator, int score, int lo, int hi, int kernel, uint32_t *mramIdx, dpu_alloc_mram_t *dpu_alloc_mram)
 {
+    // CHANGE: 2*MAX_SCORE + 1
+    // this will ensure that any wf component will have the same size
     int wv_len = hi - lo + 1;
     uint32_t cmpnt_size = 0;
 
+    // allocate wfa_cmpnt in wram
     wfa_component *wfa_cmpnt = (wfa_component *)allocate_new(allocator, sizeof(wfa_component));
     awf_offset_t *offset_ptr = (awf_offset_t *)allocate_new(allocator, (wv_len * sizeof(awf_offset_t)));
 
     wfa_cmpnt->mwavefront = (awf_offset_t *)(offset_ptr - lo);
     cmpnt_size += ROUND_UP_MULTIPLE_8(wv_len * sizeof(awf_offset_t));
+    
+    // kernel = 3 means I and D
+    // kernel = 2 means I
+    // kernel = 1 means D
+
     if (kernel == 3 || kernel == 1)
     {
 
@@ -190,6 +202,7 @@ wfa_component *allocate_new_score(dpu_alloc_wram_t *allocator, int score, int lo
 }
 
 // wavefront extend matching
+// safe
 void affine_wfa_extend(wfa_component *wfa, char *pattern, char *text, awf_offset_t pattern_len, awf_offset_t text_len, int score)
 {
     if (wfa == NULL || wfa->m_null)
@@ -213,7 +226,9 @@ void affine_wfa_extend(wfa_component *wfa, char *pattern, char *text, awf_offset
         wfa->mwavefront[k] += count;
     }
 }
+
 // end reached
+// safe
 bool affine_wfa_end_reached(wfa_component *wfa, awf_offset_t pattern_len, awf_offset_t text_len, int score)
 {
 
@@ -235,6 +250,8 @@ bool affine_wfa_end_reached(wfa_component *wfa, awf_offset_t pattern_len, awf_of
 
     return false;
 }
+
+// safe
 void affine_wfa_compute_offsets(wfa_component *wfa, wfa_set wfa_set, int lo, int hi, int score, int kernel)
 {
     // Compute score wavefronts (core)
@@ -272,11 +289,13 @@ void affine_wfa_compute_offsets(wfa_component *wfa, wfa_set wfa_set, int lo, int
     }
 }
 
+// change!
 wfa_component *affine_wfa_compute_next(int score, uint32_t *mramIdx, dpu_alloc_wram_t *alloc_obj, dpu_alloc_mram_t *dpu_alloc_mram)
 {
     wfa_set wfa_set;
 
     // get previous scores
+    // CHANGE: (score - _) % QUEUE_LEN
     int mismatch_score = score - MISMATCH;
     int o_score = score - GAP_O - GAP_E;
     int e_score = score - GAP_E;
@@ -298,6 +317,7 @@ wfa_component *affine_wfa_compute_next(int score, uint32_t *mramIdx, dpu_alloc_w
     if (wfa_set.m_sub_null && (wfa_set.i_out_null && wfa_set.d_out_null))
     {
         //  if the wavefront is null store 0 in the mram idx
+        // CHANGE: score % QUEUE_LEN
         mramIdx[score] = 0;
         return NULL;
     }
@@ -347,18 +367,23 @@ wfa_component *affine_wfa_compute_next(int score, uint32_t *mramIdx, dpu_alloc_w
     // Compute WF
     int kernel = ((!wfa_set.i_out_null) << 1) | (!wfa_set.d_out_null);
 
+    // CHANGE: 
     wfa_component *wfa = allocate_new_score(alloc_obj, score, lo, hi, kernel, &mramIdx[score], dpu_alloc_mram);
 
     affine_wfa_compute_offsets(wfa, wfa_set, lo, hi, score, kernel);
     return wfa;
 }
 
+// change!
 void affine_wfa_compute(dpu_alloc_wram_t *dpu_alloc_wram, edit_cigar_t *cigar, char *pattern, char *text, int pattern_length, int text_length, dpu_alloc_mram_t *dpu_alloc_mram)
 {
 
+    // declares wfa_score
     wfa_component *wfa_score;
 
     // MRAM base address for every WFA components
+    // WRAM stores MAX_SCORE+1 pointers to the MRAM base address of the WFA components
+    // CHANGE: change to circular queue of amount of (MAX(GAP_O+GAP_E,GAP_E,MISMATCH) + 1) * sizeof(uint32_t)
     uint32_t *wfa_mramIdx = (uint32_t *)allocate_new(dpu_alloc_wram, (MAX_SCORE + 1) * sizeof(uint32_t));
 
     wfa_score = allocate_new_score(dpu_alloc_wram, 0, 0, 0, 0, &(wfa_mramIdx[0]), dpu_alloc_mram);
@@ -390,6 +415,7 @@ void affine_wfa_compute(dpu_alloc_wram_t *dpu_alloc_wram, edit_cigar_t *cigar, c
             return;
         }
 
+        // CHANGE: score % MAX(GAP_O+GAP_E,GAP_E,MISMATCH) + 1)
         store_wfa_cmpnt_to_mram(wfa_score, wfa_mramIdx[score]);
 
         // reset wram after every iteration
@@ -411,10 +437,11 @@ int main()
     mem_reset();
     uint32_t tasklet_id = me();
 
+    // declares variable for dpu memory allocators
     dpu_alloc_wram_t dpu_alloc_wram;
     dpu_alloc_mram_t dpu_alloc_mram;
 
-    // Load parameters
+    // Load params addresses from mram to wram
     uint32_t params_m = (uint32_t)DPU_MRAM_HEAP_POINTER;
     DPUParams params_w;
     mram_read((__mram_ptr void const *)params_m, &params_w, ROUND_UP_MULTIPLE_8(sizeof(DPUParams)));
@@ -424,6 +451,7 @@ int main()
         return 0;
 
     int nb_reads_per_tasklets = (((nb_reads_per_dpu + NR_TASKLETS) / NR_TASKLETS));
+
     dpu_alloc_wram = init_dpu_alloc_wram(WRAM_SEGMENT);
 
     // Divide MRAM segments equally between tasklets
@@ -432,6 +460,7 @@ int main()
     dpu_alloc_mram.CUR_PTR_MRAM = dpu_alloc_mram.HEAD_PTR_MRAM;
     dpu_alloc_mram.mem_used_mram = 0;
 
+    // (base) mram indexes of dpu params
     uint32_t dpuRequests_m = ((uint32_t)DPU_MRAM_HEAP_POINTER) + params_w.dpuRequests_m;
     uint32_t dpuResults_m = ((uint32_t)DPU_MRAM_HEAP_POINTER) + params_w.dpuResults_m;
     uint32_t dpuPatterns_m = ((uint32_t)DPU_MRAM_HEAP_POINTER) + params_w.dpuPatterns_m;
@@ -439,21 +468,30 @@ int main()
 #ifdef BACKTRACE
     uint32_t dpuOperations_m = ((uint32_t)DPU_MRAM_HEAP_POINTER) + params_w.dpuOperations_m;
 #endif
+
+    // main read loop, cycles through each read
     for (int read_nb = 0; read_nb < nb_reads_per_tasklets; ++read_nb)
     {
+        // allocates requests & results in wram
         request_t *request_w = (request_t *)allocate_new(&dpu_alloc_wram, (sizeof(request_t)));
         result_t *result_w = (result_t *)allocate_new(&dpu_alloc_wram, (sizeof(result_t)));
 
+        // declares cigar pointer in wram
         edit_cigar_t *cigar;
         cigar = (edit_cigar_t *)allocate_new(&dpu_alloc_wram, sizeof(edit_cigar_t));
 
         if (read_nb + tasklet_id * nb_reads_per_tasklets < nb_reads_per_dpu)
         {
+            // read requests from mram to wram for that read
             mram_read((__mram_ptr void const *)(dpuRequests_m + (read_nb + tasklet_id * nb_reads_per_tasklets) * (sizeof(request_t))), request_w, ROUND_UP_MULTIPLE_8(sizeof(request_t)));
+
+            // allocates pattern & text strings in wram
             char *pattern = (char *)allocate_new(&dpu_alloc_wram, ROUND_UP_MULTIPLE_8(request_w->pattern_len));
             char *text = (char *)allocate_new(&dpu_alloc_wram, ROUND_UP_MULTIPLE_8(request_w->text_len));
 
-            //  DMA transfers can't be of size grater than 2048
+            // DMA transfers can't be of size grater than 2048
+
+            // read pattern strings from mram
             if (ROUND_UP_MULTIPLE_8(request_w->pattern_len) <= 2048)
             {
                 mram_read((__mram_ptr void const *)(dpuPatterns_m + (read_nb + tasklet_id * nb_reads_per_tasklets) * (READ_SIZE)), pattern, ROUND_UP_MULTIPLE_8(request_w->pattern_len));
@@ -474,6 +512,7 @@ int main()
                 }
             }
 
+            // read text strings from mram
             if (ROUND_UP_MULTIPLE_8(request_w->text_len) <= 2048)
             {
                 mram_read((__mram_ptr void const *)(dpuTexts_m + (read_nb + tasklet_id * nb_reads_per_tasklets) * (READ_SIZE)), text, ROUND_UP_MULTIPLE_8(request_w->text_len));
@@ -493,6 +532,8 @@ int main()
                     }
                 }
             }
+
+            // allocate an edit cigar in wram for each alignment
             edit_cigar_allocate(cigar, request_w->pattern_len, request_w->text_len, &dpu_alloc_wram);
 
 #ifdef BACKTRACE
@@ -501,8 +542,10 @@ int main()
             memset(cigar->operations, 'M', 2 * READ_SIZE);
 #endif
 
+            // compute the alignment 
             affine_wfa_compute(&dpu_alloc_wram, cigar, pattern, text, request_w->pattern_len, request_w->text_len, &dpu_alloc_mram);
 
+            // set the result's index to the request's index (?)
             result_w->idx = request_w->idx;
 #ifdef BACKTRACE
             if (ROUND_UP_MULTIPLE_8(cigar->max_operations) <= 2048)
@@ -525,11 +568,13 @@ int main()
                 }
             }
 #endif
+            // set the result based on the edit cigar
             result_w->score = cigar->score;
             result_w->max_operations = cigar->max_operations;
             result_w->begin_offset = cigar->begin_offset;
             result_w->end_offset = cigar->end_offset;
 
+            // write the result from mram to wram
             mram_write(result_w, (__mram_ptr void *)(dpuResults_m + (read_nb + tasklet_id * nb_reads_per_tasklets) * (sizeof(result_t))), sizeof(result_t));
         }
 
@@ -538,5 +583,6 @@ int main()
         dpu_alloc_mram.CUR_PTR_MRAM = dpu_alloc_mram.HEAD_PTR_MRAM;
         dpu_alloc_mram.mem_used_mram = 0;
     }
+
     return 0;
 }
