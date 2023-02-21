@@ -326,7 +326,7 @@ wfa_component *load_idwavefront_cmpnt_from_mram(dpu_alloc_wram_t *allocator, uin
     }
     wfa_component *wfa = (wfa_component *)allocate_new(allocator, sizeof(wfa_component));
     uint32_t wfa_m = ((uint32_t)DPU_MRAM_HEAP_POINTER) + mramIdx;
-    mram_read((__mram_ptr void const *)(wfa_m), wfa, ROmwavefrontUND_UP_MULTIPLE_8(sizeof(wfa_component)));
+    mram_read((__mram_ptr void const *)(wfa_m), wfa, ROUND_UP_MULTIPLE_8(sizeof(wfa_component)));
     int wv_len = wfa->hi_base - wfa->lo_base + 1;
     wfa_m += ROUND_UP_MULTIPLE_8(sizeof(wfa_component));
     wfa->mwavefront = NULL;
