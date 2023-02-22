@@ -55,6 +55,8 @@ SOFTWARE. */
 #include "dpu_allocator_wram.h"
 #include "dpu_allocator_mram.h"
 
+#define QUEUE_LEN (MAX(MISMATCH, MAX(GAP_O+GAP_E,GAP_E)) + 1)
+
 // safe
 void edit_cigar_allocate(
     edit_cigar_t *edit_cigar,
@@ -144,10 +146,13 @@ void affine_wfa_reduce_wvs(wfa_component *wfa, awf_offset_t pattern_length, awf_
 
 // insert new score into mram with a size based on wavefront length
 // change!
+// changed!
 wfa_component *allocate_new_score(dpu_alloc_wram_t *allocator, int score, int lo, int hi, int kernel, uint32_t *mramIdx, dpu_alloc_mram_t *dpu_alloc_mram)
 {
     // CHANGE: 2*MAX_SCORE + 1
     // this will ensure that any wf component will have the same size
+    // int wv_len = 2*MAX_SCORE + 1;
+
     int wv_len = hi - lo + 1;
     uint32_t cmpnt_size = 0;
 
@@ -197,6 +202,8 @@ wfa_component *allocate_new_score(dpu_alloc_wram_t *allocator, int score, int lo
     wfa_cmpnt->lo_base = lo;
     wfa_cmpnt->hi_base = hi;
     cmpnt_size += ROUND_UP_MULTIPLE_8(sizeof(wfa_component));
+
+    // adds wfa_cmpnt to mram and writes the mram index of the wfa_cmpnt to the mramIdx
     add_wfa_cmpnt_to_mram(mramIdx, cmpnt_size, dpu_alloc_mram);
     return wfa_cmpnt;
 }
@@ -290,15 +297,16 @@ void affine_wfa_compute_offsets(wfa_component *wfa, wfa_set wfa_set, int lo, int
 }
 
 // change!
+// changed!
 wfa_component *affine_wfa_compute_next(int score, uint32_t *mramIdx, dpu_alloc_wram_t *alloc_obj, dpu_alloc_mram_t *dpu_alloc_mram)
 {
     wfa_set wfa_set;
 
     // get previous scores
     // CHANGE: (score - _) % QUEUE_LEN
-    int mismatch_score = score - MISMATCH;
-    int o_score = score - GAP_O - GAP_E;
-    int e_score = score - GAP_E;
+    int mismatch_score = (score - MISMATCH) % QUEUE_LEN;
+    int o_score = (score - GAP_O - GAP_E) % QUEUE_LEN;
+    int e_score = (score - GAP_E) % QUEUE_LEN;
 
     wfa_component *wfa_mismatch = (mismatch_score < 0 || mramIdx[mismatch_score] == 0) ? NULL : load_mwavefront_cmpnt_from_mram(alloc_obj, mramIdx[mismatch_score]);
     wfa_component *wfa_o_score = (o_score < 0 || mramIdx[o_score] == 0) ? NULL : load_mwavefront_cmpnt_from_mram(alloc_obj, mramIdx[o_score]);
@@ -318,7 +326,7 @@ wfa_component *affine_wfa_compute_next(int score, uint32_t *mramIdx, dpu_alloc_w
     {
         //  if the wavefront is null store 0 in the mram idx
         // CHANGE: score % QUEUE_LEN
-        mramIdx[score] = 0;
+        mramIdx[score % QUEUE_LEN] = 0;
         return NULL;
     }
 
@@ -368,13 +376,14 @@ wfa_component *affine_wfa_compute_next(int score, uint32_t *mramIdx, dpu_alloc_w
     int kernel = ((!wfa_set.i_out_null) << 1) | (!wfa_set.d_out_null);
 
     // CHANGE: 
-    wfa_component *wfa = allocate_new_score(alloc_obj, score, lo, hi, kernel, &mramIdx[score], dpu_alloc_mram);
+    wfa_component *wfa = allocate_new_score(alloc_obj, score, lo, hi, kernel, &mramIdx[(score % QUEUE_LEN)], dpu_alloc_mram);
 
     affine_wfa_compute_offsets(wfa, wfa_set, lo, hi, score, kernel);
     return wfa;
 }
 
 // change!
+// changed!
 void affine_wfa_compute(dpu_alloc_wram_t *dpu_alloc_wram, edit_cigar_t *cigar, char *pattern, char *text, int pattern_length, int text_length, dpu_alloc_mram_t *dpu_alloc_mram)
 {
 
@@ -384,7 +393,7 @@ void affine_wfa_compute(dpu_alloc_wram_t *dpu_alloc_wram, edit_cigar_t *cigar, c
     // MRAM base address for every WFA components
     // WRAM stores MAX_SCORE+1 pointers to the MRAM base address of the WFA components
     // CHANGE: change to circular queue of amount of (MAX(GAP_O+GAP_E,GAP_E,MISMATCH) + 1) * sizeof(uint32_t)
-    uint32_t *wfa_mramIdx = (uint32_t *)allocate_new(dpu_alloc_wram, (MAX_SCORE + 1) * sizeof(uint32_t));
+    uint32_t *wfa_mramIdx = (uint32_t *)allocate_new(dpu_alloc_wram, QUEUE_LEN * sizeof(uint32_t));
 
     wfa_score = allocate_new_score(dpu_alloc_wram, 0, 0, 0, 0, &(wfa_mramIdx[0]), dpu_alloc_mram);
 
@@ -416,7 +425,7 @@ void affine_wfa_compute(dpu_alloc_wram_t *dpu_alloc_wram, edit_cigar_t *cigar, c
         }
 
         // CHANGE: score % MAX(GAP_O+GAP_E,GAP_E,MISMATCH) + 1)
-        store_wfa_cmpnt_to_mram(wfa_score, wfa_mramIdx[score]);
+        store_wfa_cmpnt_to_mram(wfa_score, wfa_mramIdx[(score % QUEUE_LEN)]);
 
         // reset wram after every iteration
         dpu_alloc_wram->CUR_PTR_WRAM = dpu_alloc_wram->WFA_PTR_WRAM;
@@ -432,6 +441,7 @@ void affine_wfa_compute(dpu_alloc_wram_t *dpu_alloc_wram, edit_cigar_t *cigar, c
     }
 }
 
+// safe
 int main()
 {
     mem_reset();
